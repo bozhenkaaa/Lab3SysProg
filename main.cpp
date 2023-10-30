@@ -1,4 +1,3 @@
-
 #include <iostream>
 #include <string>
 #include <vector>
@@ -9,6 +8,14 @@
 #include <regex>
 
 using namespace std;
+
+// Define the token type constants
+const string TT_KEYWORD = "keyword";
+const string TT_IDENTIFIER = "identifier";
+const string TT_SEPARATOR = "separator";
+const string TT_OPERATOR = "operator";
+const string TT_LITERAL = "literal";
+const string TT_ERROR = "error: unrecognized symbol";
 
 typedef vector<pair<string, string>> TokenList;
 
@@ -28,13 +35,47 @@ bool isDecimal(const string& token) {
 }
 
 bool isIdentifier(const string& token) {
-    regex identifier_regex(R"(([_a-zA-Z][_a-zA-Z0-9]*\.?)+)");
-    return regex_match(token, identifier_regex);
+    if (token.empty()) {
+        return false;
+    }
+
+    if (!((token[0] >= 'A' && token[0] <= 'Z') || (token[0] >= 'a' && token[0] <= 'z') || token[0] == '_')) {
+        return false;
+    }
+
+    for (size_t i = 1; i < token.size(); ++i) {
+        if (!((token[i] >= 'A' && token[i] <= 'Z') || (token[i] >= 'a' && token[i] <= 'z') || (token[i] >= '0' && token[i] <= '9') || token[i] == '_')) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 bool isStringLiteral(const string& token) {
-    regex string_literal_regex(R"("(\\"|[^"])*")");
-    return regex_match(token, string_literal_regex);
+    size_t open_quote = token.find('\"');
+    if (open_quote == string::npos) {
+        return false;
+    }
+
+    size_t close_quote = token.rfind('\"');
+    if (close_quote == string::npos || close_quote == 0 || close_quote <= open_quote) {
+        return false;
+    }
+
+    bool even_slashes_before = true;
+    for (size_t i = close_quote; i >= 1; --i) {
+        if (token[i - 1] != '\\') {
+            break;
+        }
+        even_slashes_before = !even_slashes_before;
+    }
+
+    if (!even_slashes_before) {
+        return false;
+    }
+
+    return true;
 }
 
 bool isCharacterLiteral(const string& token) {
@@ -42,7 +83,11 @@ bool isCharacterLiteral(const string& token) {
     return regex_match(token, char_literal_regex);
 }
 
-TokenList analyzeCode(const string& code) {
+bool isSeparator(char c) {
+    return c == '(' || c == ')' || c == '{' || c == '}' || c == '[' || c == ']' || c == ';' || c == ',' || c == '.';
+}
+
+bool isKeyword(const string& token) {
     vector<string> keywords = {"abstract", "assert", "boolean", "break", "byte", "case",
                                "catch", "char", "class", "const", "continue", "default",
                                "do", "double", "else", "enum", "extends", "final",
@@ -53,114 +98,124 @@ TokenList analyzeCode(const string& code) {
                                "super", "switch", "synchronized", "this", "throw",
                                "throws", "transient", "try", "void", "volatile", "while"};
 
-    string operators = "<>(){}[]*-+=/%^&|!;?:,\\";
+    return find(keywords.begin(), keywords.end(), token) != keywords.end();
+}
 
+bool isOperator(const string& token) {
+    vector<string> operators = {
+            "==", "!==", "<=", ">=", "&&", "||", "!=", "!",
+            "+", "-", "*", "/", "%", "&", "|", "^", "~",
+            "<<", ">>", "="
+    };
+
+    return find(operators.begin(), operators.end(), token) != operators.end();
+}
+
+vector<string> splitDots(const string& token) {
+    vector<string> tokens;
+    size_t start = 0, end = 0;
+
+    while ((end = token.find('.', start)) != string::npos) {
+        tokens.push_back(token.substr(start, end - start));
+        tokens.push_back(".");
+        start = end + 1;
+    }
+
+    tokens.push_back(token.substr(start));
+
+    return tokens;
+}
+
+TokenList analyzeToken(const string& curr_token) {
     TokenList result;
-    stringstream stringBuffer(code);
-    string line;
+    vector<string> parts = splitDots(curr_token);
+
+    for (const string& token : parts) {
+        if (isSeparator(token[0])) {
+            result.push_back(make_pair(token, TT_SEPARATOR));
+        } else if (isOperator(token)) {
+            result.push_back(make_pair(token, TT_OPERATOR));
+        } else if (isHexadecimal(token) || isFloatingPoint(token) ||
+                   isDecimal(token) || isStringLiteral(token) ||
+                   isCharacterLiteral(token)) {
+            result.push_back(make_pair(token, TT_LITERAL));
+        } else if (isKeyword(token)) {
+            result.push_back(make_pair(token, TT_KEYWORD));
+        } else if (isIdentifier(token)) {
+            result.push_back(make_pair(token, TT_IDENTIFIER));
+        } else {
+            result.push_back(make_pair(token, TT_ERROR));
+        }
+    }
+    return result;
+}
+
+TokenList analyzeCode(const string& code) {
+    TokenList result;
+    istringstream stringBuffer(code);
+
     bool in_multiline_comment = false;
     bool in_string_literal = false;
 
-    while (getline(stringBuffer, line)){
-        string token;
-        stringstream lineStream(line);
-        bool in_singleline_comment = false;
+    // Main analyzer loop
+    while (!stringBuffer.eof()) {
+        char sym;
+        string curr_token;
+        stringBuffer.get(sym);
 
-        while (lineStream >> token){
-            size_t comment_start = token.find("//");
-            size_t multiline_comment_start = token.find("/*");
-            size_t string_literal_start = token.find('\"');
+        // Skip whitespaces
+        while (isspace(sym) && !stringBuffer.eof()) {
+            stringBuffer.get(sym);
+        }
 
-            if (string_literal_start != string::npos) {
-                in_string_literal = !in_string_literal;
-                if (!in_singleline_comment && !in_multiline_comment) {
-                    token.erase(string_literal_start, 1);
-                } else {
-                    // якщо ми перебуваємо в коментарі, не враховуємо знак екранування
-                    token.erase(string_literal_start, 2);
+        // Check if reached the end of the file
+        if (stringBuffer.eof()) {
+            break;
+        }
+
+        // Process specific symbols and collect current token
+        if (sym == '"' || in_string_literal) {
+            in_string_literal = !in_string_literal;
+            curr_token = "\"";
+            while (in_string_literal && !stringBuffer.eof()) {
+                curr_token += sym;
+                stringBuffer.get(sym);
+                if (sym == '\\') {
+                    curr_token += sym;
+                    stringBuffer.get(sym);
+                }
+                if (sym == '"') {
+                    in_string_literal = false;
                 }
             }
-
-            if (comment_start != string::npos && !in_string_literal) {
-                token = token.substr(0, comment_start);
-                in_singleline_comment = true;
+            curr_token += sym;
+        } else if (isalnum(sym) || sym == '_' || sym == '.') {
+            while ((isalnum(sym) || sym == '_' || sym == '.') && !stringBuffer.eof()) {
+                curr_token += sym;
+                stringBuffer.get(sym);
             }
-
-            if (!in_multiline_comment && multiline_comment_start != string::npos && multiline_comment_start < comment_start && !in_string_literal) {
+        } else if (ispunct(sym)) {
+            if (sym == '/' && stringBuffer.peek() == '/') {
+                stringBuffer.ignore(numeric_limits<streamsize>::max(), '\n');
+                continue;
+            } else if (sym == '/' && stringBuffer.peek() == '*') {
                 in_multiline_comment = true;
-                result.push_back(make_pair("/*", "start of multiline comment"));
-            }
-
-            if (in_multiline_comment) {
-                size_t multiline_comment_end = token.find("*/");
-                if (multiline_comment_end != string::npos) {
-                    result.push_back(make_pair("*/", "end of multiline comment"));
-                    in_multiline_comment = false;
-                    token.erase(0, multiline_comment_end + 2);
-                } else {
-                    token.clear();
-                }
-            }
-
-            if (!token.empty() && !in_multiline_comment && !in_singleline_comment) {
-                // Встановити межі для ідентифікаторів та числових літералів
-                auto notOperator = [&](char c) { return find(operators.begin(), operators.end(), c) == operators.end(); };
-
-                for (size_t i = 0; i < token.size();) {
-                    string curr_token;
-
-                    if (find(operators.begin(), operators.end(), token[i]) != operators.end()) {
-                        curr_token.push_back(token[i++]);
-                        result.push_back(make_pair(curr_token, "operator or separator"));
-                    } else if (token[i] == '@') {
-                        curr_token.push_back(token[i++]);
-                        result.push_back(make_pair(curr_token, "annotation"));
-                    } else {
-                        curr_token.push_back(token[i++]);
-
-                        // Цикл для ідентифікаторів та числових літералів
-                        while (i < token.size() && notOperator(token[i])) {
-                            if (token[i] == '.') {
-                                if (i > 0 && isalnum(token[i - 1])) {
-                                    // якщо це крапка, яка розділяє пакети
-                                    curr_token.push_back(token[i++]);
-                                } else {
-                                    break; // це десяткова крапка, закінчуємо
-                                }
-                            } else {
-                                curr_token.push_back(token[i++]);
-                            }
-                        }
-
-                        if (isHexadecimal(curr_token)) {
-                            result.push_back(make_pair(curr_token, "hexadecimal literal"));
-                        } else if (isFloatingPoint(curr_token)) {
-                            result.push_back(make_pair(curr_token, "floating-point literal"));
-                        } else if (isDecimal(curr_token)) {
-                            result.push_back(make_pair(curr_token, "decimal literal"));
-                        } else if (isStringLiteral(curr_token)) {
-                            result.push_back(make_pair(curr_token, "string literal"));
-                        } else if (isCharacterLiteral(curr_token)) {
-                            result.push_back(make_pair(curr_token, "character literal"));
-                        } else if (find(keywords.begin(), keywords.end(), curr_token) != keywords.end()) {
-                            result.push_back(make_pair(curr_token, "keyword"));
-                        } else if (isIdentifier(curr_token)) {
-                            result.push_back(make_pair(curr_token, "identifier"));
-                        } else {
-                            result.push_back(make_pair(curr_token, "error: unrecognized symbol"));
-                        }
-                    }
-                }
-            }
-
-            if (in_singleline_comment) {
-                token.clear();
+                stringBuffer.ignore(1);
+                stringBuffer.get(sym);
+            } else if (sym == '*' && stringBuffer.peek() == '/') {
+                in_multiline_comment = false;
+                stringBuffer.ignore(1);
+                stringBuffer.get(sym);
+                continue;
+            } else {
+                curr_token += sym;
+                stringBuffer.get(sym);
             }
         }
 
-        // Add a detected single-line comment at the end of the line
-        if (in_singleline_comment) {
-            result.push_back(make_pair("//", "comment"));
+        if (!in_multiline_comment) {
+            TokenList part_result = analyzeToken(curr_token);
+            result.insert(result.end(), part_result.begin(), part_result.end());
         }
     }
 
@@ -184,7 +239,6 @@ int main() {
 
     TokenList token_list = analyzeCode(code);
 
-    // Вивести весь список лексем <лексема, тип_лексеми>
     for (const auto& token : token_list) {
         cout << "<" << token.first << ", " << token.second << ">" << endl;
     }
